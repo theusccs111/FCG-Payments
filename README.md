@@ -218,7 +218,7 @@ Publica Evento no Service Bus
 
 1. **Clonar o repositório**
    ```bash
-   git clone https://github.com/seu-repo/FCG-Payments.git
+   git clone https://github.com/theusccs111/FCG-Payments.git
    cd FCG-Payments
    ```
 
