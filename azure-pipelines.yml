@@ -1,0 +1,163 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  buildConfiguration: 'Release'
+  dotnetSdkVersion: '8.x'
+  tag: '$(Build.BuildId)'
+  
+  # Variáveis para suas imagens
+  dockerHubNamespace: 'theusccs111'  # Substitua pelo seu username
+  apiImageName: 'fcg-payments-api'
+  consumerImageName: 'fcg-payments-consumer'
+  
+  # Azure
+  azureSubscription: 'fcg-service-connection'
+  resourceGroup: 'FCG'
+
+stages:
+  - stage: 'Build'
+    displayName: 'Build e Testes'
+    jobs:
+      - job: 'BuildJob'
+        displayName: 'Compilar e Testar'
+        pool:
+          vmImage: 'ubuntu-latest'
+        
+        steps:
+        - task: UseDotNet@2
+          displayName: 'Instalar .NET 8'
+          inputs:
+            packageType: 'sdk'
+            version: '$(dotnetSdkVersion)'
+
+        - task: DotNetCoreCLI@2
+          displayName: 'Restaurar pacotes'
+          inputs:
+            command: 'restore'
+            projects: '**/*.csproj'
+
+        - task: DotNetCoreCLI@2
+          displayName: 'Compilar projeto'
+          inputs:
+            command: 'build'
+            arguments: '--no-restore --configuration $(buildConfiguration)'
+            projects: '**/*.csproj'
+
+        - task: DotNetCoreCLI@2
+          displayName: 'Executar testes'
+          inputs:
+            command: 'test'
+            projects: '**/*Tests/*.csproj' 
+            arguments: '--no-build --configuration $(buildConfiguration)'
+          continueOnError: true
+
+  - stage: 'BuildContainers'
+    displayName: 'Criar Containers no Docker Hub'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: 'ContainerJob'
+        displayName: 'Build e Push para Docker Hub'
+        pool:
+          vmImage: 'ubuntu-latest'
+        
+        steps:
+        # ✅ LOGIN usando a Service Connection que você criou
+        - task: Docker@2
+          displayName: 'Login no Docker Hub'
+          inputs:
+            command: 'login'
+            containerRegistry: 'docker-service-connection-0312' 
+
+        # ✅ BUILD e PUSH da API
+        - task: Docker@2
+          displayName: 'Build API Image'
+          inputs:
+            command: 'buildAndPush'
+            repository: '$(dockerHubNamespace)/$(apiImageName)'
+            dockerfile: 'FCG-Payments.Api/Dockerfile'
+            containerRegistry: 'docker-service-connection-0312'
+            buildContext: '$(Build.SourcesDirectory)'
+            tags: |
+              latest
+              $(Build.BuildId)
+              $(Build.SourceBranchName)-$(Build.BuildId)
+
+        # ✅ BUILD e PUSH do Consumer
+        - task: Docker@2
+          displayName: 'Build Consumer Image'
+          inputs:
+            command: 'buildAndPush'
+            repository: '$(dockerHubNamespace)/$(consumerImageName)'
+            dockerfile: 'FCG-Payments.Consumer/Dockerfile'  
+            containerRegistry: 'docker-service-connection-0312' 
+            buildContext: '$(Build.SourcesDirectory)'
+            tags: |
+              latest
+              $(Build.BuildId)
+              $(Build.SourceBranchName)-$(Build.BuildId)
+          continueOnError: true 
+
+  - stage: 'Deploy'
+    displayName: 'Publicar no Azure Container Apps'
+    dependsOn: BuildContainers
+    condition: succeeded()
+    jobs:
+      - deployment: 'DeployJob'
+        displayName: 'Deploy Container Apps'
+        environment: 'production'
+        pool:
+          vmImage: 'ubuntu-latest'
+        
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+              # ✅ DEPLOY API do Docker Hub
+              - task: AzureCLI@2
+                displayName: 'Deploy API'
+                inputs:
+                  azureSubscription: '$(azureSubscription)'
+                  scriptType: 'bash'
+                  scriptLocation: 'inlineScript'
+                  inlineScript: |
+                    echo "🚀 Atualizando API do Docker Hub..."
+                    
+                    # Atualiza a imagem no Container App
+                    az containerapp update \
+                      --name fcg-payments-api \
+                      --resource-group $(resourceGroup) \
+                      --image $(dockerHubNamespace)/$(apiImageName):$(Build.BuildId)
+                    
+                    # Obtém a URL
+                    API_URL=$(az containerapp show \
+                      --name fcg-payments-api \
+                      --resource-group $(resourceGroup) \
+                      --query properties.configuration.ingress.fqdn \
+                      -o tsv)
+                    
+                    echo "✅ Deploy da API concluído!"
+                    echo "🌐 URL: https://$API_URL"
+                    echo "📦 Imagem: $(dockerHubNamespace)/$(apiImageName):$(Build.BuildId)"
+
+              # ✅ DEPLOY Consumer do Docker Hub
+              - task: AzureCLI@2
+                displayName: 'Deploy Consumer'
+                inputs:
+                  azureSubscription: '$(azureSubscription)'
+                  scriptType: 'bash'
+                  scriptLocation: 'inlineScript'
+                  inlineScript: |
+                    echo "🚀 Atualizando Consumer do Docker Hub..."
+                    
+                    az containerapp update \
+                      --name fcg-payments-consumer \
+                      --resource-group $(resourceGroup) \
+                      --image $(dockerHubNamespace)/$(consumerImageName):$(Build.BuildId)
+                    
+                    echo "✅ Deploy do Consumer concluído!"
+                    echo "📦 Imagem: $(dockerHubNamespace)/$(consumerImageName):$(Build.BuildId)"
+                continueOnError: true
